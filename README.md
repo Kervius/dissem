@@ -22,7 +22,7 @@ http://en.wikipedia.org/wiki/Semaphore_(programming)
     dissem sem [semaphore_name] [delta]
 
 #### Lifecycle
-The semaphore is created first time it is accessed with the value 0. The semaphore exists until the server instance of dissem is not restarted.
+The semaphore is created first time it is accessed. Initial value is always 0. The semaphore exists until the server instance of dissem is not restarted.
 
 #### Example1: Simple transaction
 On server1:
