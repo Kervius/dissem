@@ -1,6 +1,8 @@
 
-all:
-	echo "Nothing to do"
+SCRIPT=dissem.pl
 
-test:
+all:
+	@perl -c ${SCRIPT}
+
+test: all
 	$(MAKE) -C t all

@@ -9,11 +9,13 @@ use warnings;
 use strict;
 
 #use POSIX
-use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
+#use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 use IO::Select;
 use IO::Socket::INET;
 use Storable qw(nfreeze thaw);
 use Data::Dumper;
+use Socket qw/MSG_WAITALL IPPROTO_TCP TCP_NODELAY/;
+# MSG_WAITALL: non-blocking sockets appear to be not-portable
 
 
 my %sema;
@@ -27,7 +29,7 @@ my $sel = IO::Select->new();
 
 if (@ARGV) {
 	warn "cli: @ARGV\n";
-	cli_proc(@ARGV);
+	exit( cli_proc(@ARGV) );
 } else {
 	warn "srv loop\n";
 	srv_loop();
@@ -52,7 +54,7 @@ sub srv_loop
 	{
 		my @socks = $sel->can_read( 60 );
 
-		warn "timeout? h=@{[$sel->handles()]}" unless @socks;
+		#warn "timeout? h=@{[$sel->handles()]}" unless @socks;
 
 		my $check_fini = 0;
 		for my $sock (@socks) {
@@ -72,6 +74,7 @@ sub srv_loop
 				my $new_cli = $ss->accept();
 				die unless $new_cli;
 				warn "srv: have new client: $new_cli\n";
+    				setsockopt($new_cli, IPPROTO_TCP, TCP_NODELAY, 1);
 				#sock_non_block( $new_cli );
 				$cli{ $new_cli } = { s => $new_cli, st => 'C' };
 				$sel->add( $new_cli );
@@ -103,15 +106,8 @@ sub send_cli_msg
 	else {
 		die "internal error";
 	}
-
-	my $bin = nfreeze( $resp );
-	my $packet = pack( 'N', length($bin) );
-	$packet .= $bin;
-
-	my $rc;
-
-	eval { $rc = $s->send( $packet, 0 ); };
-	die "srv: error sending to $s" unless defined $rc && $rc == length($packet);
+	
+	send_message( $s, 'srv', $resp );
 }
 
 sub end_cli
@@ -276,25 +272,9 @@ sub proc_cli_readable
 	my ($cli) = @_;
 	my $s = $cli->{s};
 	
-	my $data;
-	my $rc = $s->recv( $data, 4 );
-	if (defined($rc) && length($data) == 0) {
-		end_cli( $cli );
-		die if ++$count_x1 > 5;
-		return 'OK';
-	}
-	die "srv: socket($s) error" unless defined($rc) && length($data) == 4;
-
-	warn "srv: recvd bytes: ".length($data);
-
-	my $len = unpack( 'N', $data );
-	$rc = $s->recv( $data, $len );
-	die "socket error" unless defined($rc) && length($data) == $len;
-	warn "srv: recvd bytes: ".length($data);
-
-	my $hash_ref = thaw( $data );
-	die unless defined $hash_ref;
-	die unless ref($hash_ref) eq 'HASH';
+	my $hash_ref;
+	eval { $hash_ref = recv_message( $s, 'srv' ); };
+	warn "$@" if $@;
 
 	my ($cmd, $name, $count) = @$hash_ref{qw/cmd name count/};
 
@@ -316,16 +296,16 @@ sub proc_cli_readable
 
 
 
-sub sock_non_block
-{
-	my ($sock) = @_;
-
-
-	my $flags = fcntl($sock, F_GETFL, 0)
-			or die "Can't get flags for the socket: $!\n";
-	$flags = fcntl($sock, F_SETFL, $flags | O_NONBLOCK)
-			or die "Can't set flags for the socket: $!\n";
-}
+###	sub sock_non_block
+###	{
+###		my ($sock) = @_;
+###	
+###	
+###		my $flags = fcntl($sock, F_GETFL, 0)
+###				or die "Can't get flags for the socket: $!\n";
+###		$flags = fcntl($sock, F_SETFL, $flags | O_NONBLOCK)
+###				or die "Can't set flags for the socket: $!\n";
+###	}
 
 
 # barrier BR001 2
@@ -335,36 +315,35 @@ sub cli_proc
 
 	my %req = ( cmd => $cmd, name => $name, count => $count );
 
-	my $bin_hash = nfreeze( \%req );
-	my $bin = pack( 'N', length($bin_hash) ) . $bin_hash;
-
 	my $sock = IO::Socket::INET->new( 'PeerAddr'=>'localhost:11399', 'Proto' => 'tcp' );
 	die 'cli: connect error' unless $sock;
+	setsockopt($sock, IPPROTO_TCP, TCP_NODELAY, 1);
 
 	my $rc;
 	my $data;
 
-	warn "cli: sending ".length($bin_hash)." bytes.";
-	$rc = $sock->send( $bin );
-	die 'cli: send error' unless defined $rc;
+	eval { send_message( $sock, 'cli', \%req ); };
+	die "$@" if $@;
 
-	warn "cli: wait response...";
-	$rc = $sock->recv( $data, 4, 0 );
-	die 'cli: recv error' unless defined $rc || length($data) != 4;
-	warn "cli: recvd bytes:".length($data);
-	my $len = unpack( 'N', $data );
-	die "cli: crappy len: $len" if $len < 10 || $len > 16*1024;
-	$rc = $sock->recv( $data, $len, 0 );
-	die 'cli: recv error' unless defined $rc || length($data) != $len;
-	warn "cli: recvd bytes:".length($data);
+	my $hash_ref;
+	eval { $hash_ref = recv_message( $sock, 'cli' ); };
+	die "$@" if $@;
 
-	my $hash_ref = thaw( $data );
-	die 'cli: bad resp' unless ref($hash_ref) eq 'HASH';
-	warn Dumper( $hash_ref );
 
-	die unless $hash_ref->{msg} =~ /^DONE/;
-
-	return 0;
+	if (exists $hash_ref->{msg}) {
+		if ($hash_ref->{msg} =~ /^DONE/) {
+			if ($hash_ref->{msg} ne 'DONE') {
+				(my $msg = $hash_ref->{msg}) =~ s!^DONE\s+!!;
+				print $msg, "\n";
+			}
+			return 0;
+		}
+		else {
+			return 1;
+		}
+	} else {
+		die 'cli: unknown response: ', Dumper( $hash_ref ), "\n";
+	}
 }
 
 
@@ -376,18 +355,31 @@ sub recv_message
 	my $rc;
 	my $data;
 
-	$rc = $sock->recv( $data, 4, 0 );
-	die "$ctx: recv error" unless defined $rc || length($data) != 4;
+	$rc = $sock->recv( $data, 4, MSG_WAITALL );
+	die "$ctx: recv error: $!" unless defined $rc;
+	if (length($data) == 0) {
+		warn "$ctx: EOF";
+		return undef;
+	}
+	die "$ctx: short recv (".length($data)." != 4)"
+		unless length($data) == 4;
+
 	warn "$ctx: recvd bytes:".length($data) if $verbose;
 	
 	my $len = unpack( 'N', $data );
 	die "$ctx: bad len: $len" if $len < 10 || $len > 16*1024;
 
-	$rc = $sock->recv( $data, $len, 0 );
-	die "$ctx: recv error" unless defined $rc || length($data) != $len;
-	warn "$ctx: recvd bytes:".length($data);
+	$rc = $sock->recv( $data, $len, MSG_WAITALL );
+	die "$ctx: recv error: $!" unless defined $rc;
+	if (length($data) == 0) {
+		die "$ctx: unexpected EOF";
+	}
+	die "$ctx: short recv (".length($data)." != $len)"
+		unless length($data) == $len;
+	warn "$ctx: recvd bytes:".length($data) if $verbose;
 
 	my $hash_ref = thaw( $data );
+	die "$ctx: bad message" unless defined $hash_ref;
 	die "$ctx: bad message" unless ref($hash_ref) eq 'HASH';
 
 	return $hash_ref;
@@ -395,15 +387,17 @@ sub recv_message
 
 sub send_message
 {
-	my ($sock, $ctx, %req) = @_;
+	my $sock = shift;
+	my $ctx = shift;
+	my $rreq = ref($_[0]) eq 'HASH' ? $_[0] : { @_ };
 
-	my $bin_hash = nfreeze( \%req );
+	my $bin_hash = nfreeze( $rreq );
 	my $bin = pack( 'N', length($bin_hash) ) . $bin_hash;
 
 	warn "$ctx: sending ".length($bin_hash)." bytes." if $verbose;
 	my $rc = $sock->send( $bin );
-	die "$ctx: send error" unless defined $rc;
-	die "$ctx: short send" unless $rc == length($bin);
+	die "$ctx: send error: $!" unless defined $rc;
+	die "$ctx: short send ($rc != ".length($bin).")" unless $rc == length($bin);
 
 	return 1;
 }
