@@ -21,6 +21,8 @@ my %brr;
 my %cli;
 my %err_cli_list;
 
+my $verbose = 1;
+
 my $sel = IO::Select->new();
 
 if (@ARGV) {
@@ -303,11 +305,11 @@ sub proc_cli_readable
 	if ($cmd eq 'barrier') {
 		return proc_br( $cli, $name, $count );
 	}
-	elsif ($cmd eq 'sem') {
+	elsif ($cmd eq 'sem' || $cmd eq 'sema' || $cmd eq 'semaphore') {
 		return proc_sema( $cli, $name, $count );
 	}
 	else {
-		end_cli( $cli, 'ERR' );
+		end_cli( $cli, 'ERR bad object: '.$cmd );
 		return 'ERR';
 	}
 }
@@ -365,3 +367,43 @@ sub cli_proc
 	return 0;
 }
 
+
+sub recv_message
+{
+	my ($sock, $ctx) = @_;
+	$ctx = '' unless defined $ctx;
+
+	my $rc;
+	my $data;
+
+	$rc = $sock->recv( $data, 4, 0 );
+	die "$ctx: recv error" unless defined $rc || length($data) != 4;
+	warn "$ctx: recvd bytes:".length($data) if $verbose;
+	
+	my $len = unpack( 'N', $data );
+	die "$ctx: bad len: $len" if $len < 10 || $len > 16*1024;
+
+	$rc = $sock->recv( $data, $len, 0 );
+	die "$ctx: recv error" unless defined $rc || length($data) != $len;
+	warn "$ctx: recvd bytes:".length($data);
+
+	my $hash_ref = thaw( $data );
+	die "$ctx: bad message" unless ref($hash_ref) eq 'HASH';
+
+	return $hash_ref;
+}
+
+sub send_message
+{
+	my ($sock, $ctx, %req) = @_;
+
+	my $bin_hash = nfreeze( \%req );
+	my $bin = pack( 'N', length($bin_hash) ) . $bin_hash;
+
+	warn "$ctx: sending ".length($bin_hash)." bytes." if $verbose;
+	my $rc = $sock->send( $bin );
+	die "$ctx: send error" unless defined $rc;
+	die "$ctx: short send" unless $rc == length($bin);
+
+	return 1;
+}
