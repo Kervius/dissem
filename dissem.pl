@@ -44,6 +44,7 @@ GetOptionsFromArray(
 	'block-on-error|H' => \$opt_cli_block_on_error,
 	'verbose|v' => sub { $opt_verbose++; },
 	'quiet|q' => sub { $opt_verbose-- if $opt_verbose; },
+	'help|h' => sub { exit(usage(0)); },
 ) or exit(usage(1));
 
 unless ($opt_command && $opt_name) {
@@ -452,7 +453,8 @@ sub usage
 {
 	my ($rc) = @_;
 	print <<EEEE;
-dissem. Simple client/server semaphore.
+
+dissem. Simple client/server semaphore. Usage:
 
 	Server mode:
 		dissem --server
@@ -460,7 +462,7 @@ dissem. Simple client/server semaphore.
 		dissem sem test1 -1
 		dissem --object sem --namee test1 --count=-1
 
-	Summary of options:
+	Summary of command-line options:
 	--server	Server mode. Doesn't daemonize.
 	--listen <IP>	Listen addr for the server
 
@@ -476,6 +478,7 @@ dissem. Simple client/server semaphore.
 	--block-on-error|-H	Client should block on any errorr.
 	--verbose|-v	Increment verbosity level.
 	--quiet|-q	Decrement verbosity level
+
 EEEE
 	return $rc;
 }
