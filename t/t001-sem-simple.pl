@@ -4,7 +4,7 @@ use strict;
 use warnings;
 #use POSIX ":sys_wait_h";
 
-my @dissem_server = qw(../dissem.pl);
+my @dissem_server = qw(../dissem.pl --server);
 my $dissem_client = '../dissem.pl';
 
 my $server_pid;

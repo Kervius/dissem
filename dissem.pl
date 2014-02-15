@@ -1,21 +1,55 @@
 #!/usr/bin/env perl
 
-# barrier BR001 2
-# sem SM001 1
-# sem SM001 -1
-# sem SM001 0
-
 use warnings;
 use strict;
 
-#use POSIX
-#use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 use IO::Select;
 use IO::Socket::INET;
 use Storable qw(nfreeze thaw);
 use Data::Dumper;
 use Socket qw/MSG_WAITALL IPPROTO_TCP TCP_NODELAY/;
+#use POSIX
+#use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 # MSG_WAITALL: non-blocking sockets appear to be not-portable
+
+use Getopt::Long qw/GetOptionsFromArray/;
+
+
+my @config_files = ("/etc/dissem.conf", "/usr/local/etc/dissem.conf", ($ENV{HOME} ? $ENV{HOME}."/.dissem.conf" : ()));
+my $opt_server_mode = 0;
+my $opt_server_addr = 'localhost';
+my $opt_listen_addr = '0.0.0.0';
+my $opt_port = 11399;
+my $opt_command = '';
+my $opt_name = '';
+my $opt_count = 0;
+my $opt_verbose = 0;
+my $opt_cli_block_on_error = 0;
+
+my @opt_list = load_opts( @ARGV );
+
+#warn "xxx: @opt_list";
+warn "all opts: @opt_list" if "@opt_list" =~ /--verbose/; # a hack.
+
+Getopt::Long::Configure('require_order');
+GetOptionsFromArray(
+	\@opt_list,
+	'server' => \$opt_server_mode,	# --server
+	'address|A=s' => \$opt_server_addr,	# --addr=<serveraddr>
+	'listen=s' => \$opt_listen_addr,	# --listen=<bind-addr>
+	'port|p=i' => \$opt_port,		# --port=<port>
+	'command|object=s' => \$opt_command,
+	'name=s' => \$opt_name,
+	'count=i' => \$opt_count,
+	'block-on-error|H' => \$opt_cli_block_on_error,
+	'verbose|v' => sub { $opt_verbose++; },
+	'quiet|q' => sub { $opt_verbose-- if $opt_verbose; },
+) or exit(usage(1));
+
+unless ($opt_command && $opt_name) {
+	# support traditional client syntax: dissem sem <name> <count>
+	($opt_command, $opt_name, $opt_count) = @opt_list if @opt_list == 3;
+};
 
 
 my %sema;
@@ -27,19 +61,21 @@ my $verbose = 1;
 
 my $sel = IO::Select->new();
 
-if (@ARGV) {
-	warn "cli: @ARGV\n";
-	exit( cli_proc(@ARGV) );
-} else {
-	warn "srv loop\n";
+if ($opt_server_mode) {
+	warn "srv loop\n" if $opt_verbose;
 	srv_loop();
+}
+else {
+	warn "cli: $opt_command $opt_name $opt_count\n" if $opt_verbose;
+	exit( cli_proc($opt_command, $opt_name, $opt_count) );
 }
 
 sub srv_loop
 {
 
 	my $ss = IO::Socket::INET->new(
-		'LocalAddr'=>'0.0.0.0:11399', 
+		'LocalAddr' => $opt_listen_addr,
+		'LocalPort' => $opt_port,
 		'Proto' => 'tcp',
 		'Blocking' => 0,
 		'Listen' => 1,
@@ -61,7 +97,7 @@ sub srv_loop
 			if ($sock ne $ss) {
 				my $cli = $cli{$sock};
 				die unless defined $cli;
-				warn "srv: sock: ".$sock;
+				warn "srv: sock: ".$sock if $opt_verbose;
 				my $rc = proc_cli_readable( $cli );
 				if ($rc eq 'OK') {
 					# nothing to do
@@ -72,13 +108,13 @@ sub srv_loop
 			}
 			else {
 				my $new_cli = $ss->accept();
-				die unless $new_cli;
-				warn "srv: have new client: $new_cli\n";
-    				setsockopt($new_cli, IPPROTO_TCP, TCP_NODELAY, 1);
-				#sock_non_block( $new_cli );
-				$cli{ $new_cli } = { s => $new_cli, st => 'C' };
-				$sel->add( $new_cli );
-				next;
+				if ($new_cli) {
+					warn "srv: have new client: $new_cli\n" if $opt_verbose;
+					setsockopt($new_cli, IPPROTO_TCP, TCP_NODELAY, 1);
+					#sock_non_block( $new_cli );
+					$cli{ $new_cli } = { s => $new_cli, st => 'C' };
+					$sel->add( $new_cli );
+				}
 			}
 		}
 		check_cli_fini() if $check_fini;
@@ -100,11 +136,11 @@ sub send_cli_msg
 	}
 	elsif (@opts % 2 == 0) {
 		my %resp = @opts;
-		die unless exists $resp{msg};
+		die "internal error: bad @opts" unless exists $resp{msg};
 		$resp = \%resp;
 	}
 	else {
-		die "internal error";
+		die "internal error: bad @opts";
 	}
 	
 	send_message( $s, 'srv', $resp );
@@ -121,7 +157,7 @@ sub end_cli
 		return;
 	}
 
-	warn "srv: end_cli: ".$s." with [@msg]";
+	warn "srv: end_cli: ".$s." with [@msg]" if $opt_verbose;
 
 	send_cli_msg( $cli, @msg ) if @msg;
 
@@ -241,7 +277,7 @@ sub proc_sema
 	if ($new_count < 0) {
 		# client must block
 		push @{$sema->{clients}}, [$cli, $count];
-		warn "srv: sema: ".$cli->{s}.": blocks for $count @ ".$sema->{count};
+		warn "srv: sema: ".$cli->{s}.": blocks for $count @ ".$sema->{count} if $opt_verbose;
 		return 'OK';
 	}
 	else {
@@ -249,13 +285,13 @@ sub proc_sema
 		$sema->{count} = $new_count;
 		push @{$sema->{fini_cli}}, $cli;
 
-		warn "srv: sema: ".$cli->{s}.": is ok for $count @ ".$sema->{count};
+		warn "srv: sema: ".$cli->{s}.": is ok for $count @ ".$sema->{count} if $opt_verbose;
 
 		# some other clients too.
 		while ( @{$sema->{clients}} ) {
 			my ($cli2, $count2) = @{$sema->{clients}->[0]};
 			last unless $sema->{count} + $count2 >= 0;
-			warn "srv: sema: ".$cli2->{s}.": is ok for $count2 @ ".$sema->{count};
+			warn "srv: sema: ".$cli2->{s}.": is ok for $count2 @ ".$sema->{count} if $opt_verbose;
 			$sema->{count} += $count2;
 			push @{$sema->{fini_cli}}, $cli2;
 			pop @{$sema->{clients}};
@@ -264,8 +300,6 @@ sub proc_sema
 	}
 
 }
-
-my $count_x1 = 0;
 
 sub proc_cli_readable
 {
@@ -282,7 +316,7 @@ sub proc_cli_readable
 		return 'ERR';
 	}
 
-	if ($cmd eq 'barrier') {
+	if ($cmd eq 'barrier' || $cmd eq 'br') {
 		return proc_br( $cli, $name, $count );
 	}
 	elsif ($cmd eq 'sem' || $cmd eq 'sema' || $cmd eq 'semaphore') {
@@ -307,15 +341,27 @@ sub proc_cli_readable
 ###				or die "Can't set flags for the socket: $!\n";
 ###	}
 
+sub cli_done
+{
+	my ($rc, $msg) = @_;
+	if ($rc) {
+		warn "$msg\n" if $msg;
+		if ($opt_cli_block_on_error) {
+			while(1) { sleep; };
+		}
+	}
+	else {
+	}
+	return $rc;
+}
 
-# barrier BR001 2
 sub cli_proc
 {
 	my ($cmd, $name, $count) = @_;
 
 	my %req = ( cmd => $cmd, name => $name, count => $count );
 
-	my $sock = IO::Socket::INET->new( 'PeerAddr'=>'localhost:11399', 'Proto' => 'tcp' );
+	my $sock = IO::Socket::INET->new( 'PeerAddr'=>$opt_server_addr, PeerPort => $opt_port, 'Proto' => 'tcp' );
 	die 'cli: connect error' unless $sock;
 	setsockopt($sock, IPPROTO_TCP, TCP_NODELAY, 1);
 
@@ -323,11 +369,11 @@ sub cli_proc
 	my $data;
 
 	eval { send_message( $sock, 'cli', \%req ); };
-	die "$@" if $@;
+	return cli_done( 3, "cli: send: $@" ) if $@;
 
 	my $hash_ref;
 	eval { $hash_ref = recv_message( $sock, 'cli' ); };
-	die "$@" if $@;
+	return cli_done( 3, "cli: recv: $@" ) if $@;
 
 
 	if (exists $hash_ref->{msg}) {
@@ -336,13 +382,13 @@ sub cli_proc
 				(my $msg = $hash_ref->{msg}) =~ s!^DONE\s+!!;
 				print $msg, "\n";
 			}
-			return 0;
+			return cli_done( 0 );
 		}
 		else {
-			return 1;
+			return cli_done( 1, $hash_ref->{msg} );
 		}
 	} else {
-		die 'cli: unknown response: ', Dumper( $hash_ref ), "\n";
+		return cli_done( 2, 'cli: unknown response: '.Dumper( $hash_ref ) );
 	}
 }
 
@@ -364,7 +410,7 @@ sub recv_message
 	die "$ctx: short recv (".length($data)." != 4)"
 		unless length($data) == 4;
 
-	warn "$ctx: recvd bytes:".length($data) if $verbose;
+	warn "$ctx: recvd bytes:".length($data) if $opt_verbose;
 	
 	my $len = unpack( 'N', $data );
 	die "$ctx: bad len: $len" if $len < 10 || $len > 16*1024;
@@ -376,7 +422,7 @@ sub recv_message
 	}
 	die "$ctx: short recv (".length($data)." != $len)"
 		unless length($data) == $len;
-	warn "$ctx: recvd bytes:".length($data) if $verbose;
+	warn "$ctx: recvd bytes:".length($data) if $opt_verbose;
 
 	my $hash_ref = thaw( $data );
 	die "$ctx: bad message" unless defined $hash_ref;
@@ -394,10 +440,79 @@ sub send_message
 	my $bin_hash = nfreeze( $rreq );
 	my $bin = pack( 'N', length($bin_hash) ) . $bin_hash;
 
-	warn "$ctx: sending ".length($bin_hash)." bytes." if $verbose;
+	warn "$ctx: sending ".length($bin_hash)." bytes." if $opt_verbose;
 	my $rc = $sock->send( $bin );
 	die "$ctx: send error: $!" unless defined $rc;
 	die "$ctx: short send ($rc != ".length($bin).")" unless $rc == length($bin);
 
 	return 1;
+}
+
+sub usage
+{
+	my ($rc) = @_;
+	print <<EEEE;
+dissem. Simple client/server semaphore.
+
+	Server mode:
+		dissem --server
+	Client:
+		dissem sem test1 -1
+		dissem --object sem --namee test1 --count=-1
+
+	Summary of options:
+	--server	Server mode. Doesn't daemonize.
+	--listen <IP>	Listen addr for the server
+
+	--port|-p <N>	Port number server/client should use
+
+	--addr|-A <IP>	IP of the dissem server client should use
+	--command <S>	
+	--object <S>	Command/object type client is ran for.
+			'semaphore'/'sema'/'sem' for semaphore,
+			or 'barrier'/'br' for barrier.
+	--name <S>	Name of the object
+	--count <N>	The object-specific count/number.
+	--block-on-error|-H	Client should block on any errorr.
+	--verbose|-v	Increment verbosity level.
+	--quiet|-q	Decrement verbosity level
+EEEE
+	return $rc;
+}
+
+sub load_opts
+{
+	my (@argv) = @ARGV;
+	my @ret;
+
+	my @extra_files;
+	my $env_flags='';
+
+	if ($ENV{DISSEM_FLAGS}) {
+		my $tmp = $ENV{DISSEM_FLAGS};
+		if ($tmp =~ s!^@!!) {
+			push @extra_files, $tmp;
+		} else {
+			$env_flags = $tmp;
+		}
+	}
+
+	for my $grc (@config_files, @extra_files) {
+		next unless -f $grc && -r $grc && -s $grc;
+		open my $f, '<', $grc or next;
+		while (<$f>) {
+			chomp;
+			next if /^\s*#/; # comments
+			next if /^\s*$/;
+			push @ret, $_;
+		}
+		undef $f;
+	}
+
+	if ($env_flags) {
+		push @ret, split /\s+/, $env_flags;
+	}
+
+	push @ret, @ARGV;
+	return @ret;
 }
