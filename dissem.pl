@@ -26,6 +26,7 @@ my $opt_count = 0;
 my $opt_verbose = 0;
 my $opt_cli_block_on_error = 0;
 
+exit(usage(0)) unless @ARGV;
 my @opt_list = load_opts( @ARGV );
 
 #warn "xxx: @opt_list";
@@ -485,7 +486,7 @@ EEEE
 
 sub load_opts
 {
-	my (@argv) = @ARGV;
+	my (@argv) = @_;
 	my @ret;
 
 	my @extra_files;
